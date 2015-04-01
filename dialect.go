@@ -473,11 +473,11 @@ func (d SqlServerDialect) ToSqlType(val reflect.Type, maxsize int, isAutoIncr bo
 	case reflect.Int64:
 		return "bigint"
 	case reflect.Uint64:
-		return "bigint"
+		return "numeric(20)"
 	case reflect.Float32:
-		return "real"
+		return "float(24)" // in SQL Server float(24) is stored as 32 bits but this is not equivalent to IEEE-754 Float32 NaN is not supported for example
 	case reflect.Float64:
-		return "float(53)"
+		return "float(53)" // in SQL Server float(53) is stored as 64 bits but this is not equivalent to IEEE-754 Float64 NaN is not supported for example
 	case reflect.Slice:
 		if val.Elem().Kind() == reflect.Uint8 {
 			return "varbinary"
@@ -490,15 +490,15 @@ func (d SqlServerDialect) ToSqlType(val reflect.Type, maxsize int, isAutoIncr bo
 	case "NullFloat64":
 		return "float(53)"
 	case "NullBool":
-		return "tinyint"
+		return "bit" // bit is a nullable type in sql server.
 	case "Time":
-		return "datetime"
+		return "datetime2" // Golang has nanosecond precision, datetime doesn't cut it.
 	}
 
 	if maxsize < 1 {
-		maxsize = 255
+		return "nvarchar(max)"
 	}
-	return fmt.Sprintf("varchar(%d)", maxsize)
+	return fmt.Sprintf("nvarchar(%s)", maxsize)
 }
 
 // Returns auto_increment
@@ -517,12 +517,11 @@ func (d SqlServerDialect) AutoIncrInsertSuffix(col *ColumnMap) string {
 
 // Returns suffix
 func (d SqlServerDialect) CreateTableSuffix() string {
-
 	return d.suffix
 }
 
 func (d SqlServerDialect) TruncateClause() string {
-	return "delete from"
+	return "truncate table"
 }
 
 // Returns "?"
@@ -534,39 +533,43 @@ func (d SqlServerDialect) InsertAutoIncr(exec SqlExecutor, insertSql string, par
 	return standardInsertAutoIncr(exec, insertSql, params...)
 }
 
+// this function implements the SQL Server QUOTENAME() function.
 func (d SqlServerDialect) QuoteField(f string) string {
-	return `"` + f + `"`
+	return `[` + strings.Replace(f, `]`, `]]`, -1) + `]`
 }
 
 func (d SqlServerDialect) QuotedTableForQuery(schema string, table string) string {
 	if strings.TrimSpace(schema) == "" {
-		return table
+		return d.QuoteField(table)
 	}
-	return schema + "." + table
+	return d.QuoteField(schema) + "." + d.QuoteField(table)
 }
 
 func (d SqlServerDialect) QuerySuffix() string { return ";" }
 
+// The function schema_id does not handle a quoted name. As a consequence,
+// this function is sql injection prone :(
 func (d SqlServerDialect) IfSchemaNotExists(command, schema string) string {
-	s := fmt.Sprintf("if not exists (select name from sys.schemas where name = '%s') %s", schema, command)
+	s := fmt.Sprintf("if schema_id(N'%s') is null %s", schema, command)
 	return s
 }
 
+// the function object_id can handle quoted names.
 func (d SqlServerDialect) IfTableExists(command, schema, table string) string {
 	var schema_clause string
 	if strings.TrimSpace(schema) != "" {
-		schema_clause = fmt.Sprintf("table_schema = '%s' and ", schema)
+		schema_clause = fmt.Sprintf("%s.", d.QuoteField(schema))
 	}
-	s := fmt.Sprintf("if exists (select * from information_schema.tables where %stable_name = '%s') %s", schema_clause, table, command)
+	s := fmt.Sprintf("if object_id('%s%s') is not null %s", schema_clause, d.QuoteField(table), command)
 	return s
 }
 
 func (d SqlServerDialect) IfTableNotExists(command, schema, table string) string {
 	var schema_clause string
 	if strings.TrimSpace(schema) != "" {
-		schema_clause = fmt.Sprintf("table_schema = '%s' and ", schema)
+		schema_clause = fmt.Sprintf("%s.", schema)
 	}
-	s := fmt.Sprintf("if not exists (select * from information_schema.tables where %stable_name = '%s') %s", schema_clause, table, command)
+	s := fmt.Sprintf("if object_id('%s%s') is null %s", schema_clause, table, command)
 	return s
 }
 
